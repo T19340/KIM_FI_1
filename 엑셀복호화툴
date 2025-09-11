@@ -1,0 +1,387 @@
+# 엑셀 복호화 툴 (엑셀 외 미완성)
+
+# =============================================================================
+# 수동 설정 부분
+# =============================================================================
+working_directory = r"D:\채권\작업중"
+source_file = "real_data.xlsx"
+output_prefix = "decrypted_"
+# =============================================================================
+# 자동 실행 부분 (수정 불필요)
+# =============================================================================
+import os
+import win32com.client
+from pathlib import Path
+from datetime import datetime
+import time
+import pythoncom
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, Border, Side
+
+def clean_cell_value(value):
+    """셀 값에서 타임존 정보 제거"""
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    return value
+
+def excel_drm_bypass(source_path, output_path):
+    """Excel DRM 우회 (기존 검증된 코드)"""
+    print("Excel 파일 처리 중...")
+    
+    pythoncom.CoInitialize()
+    excel = win32com.client.DispatchEx("Excel.Application")
+    excel.Visible = False
+    excel.DisplayAlerts = False
+    
+    try:
+        workbook = excel.Workbooks.Open(source_path)
+        worksheet = workbook.Worksheets(1)
+        used_range = worksheet.UsedRange
+        
+        if not used_range:
+            print("빈 워크시트입니다.")
+            return False
+            
+        rows = used_range.Rows.Count
+        cols = used_range.Columns.Count
+        print(f"데이터 범위: {rows}행 {cols}열")
+        
+        data_range = used_range.Value
+        cleaned_data = []
+        
+        if isinstance(data_range, tuple):
+            for row_data in data_range:
+                if isinstance(row_data, tuple):
+                    cleaned_row = [clean_cell_value(cell) for cell in row_data]
+                else:
+                    cleaned_row = [clean_cell_value(row_data)]
+                cleaned_data.append(cleaned_row)
+        else:
+            cleaned_data = [[clean_cell_value(data_range)]]
+        
+        workbook.Close(False)
+        excel.Quit()
+        pythoncom.CoUninitialize()
+        
+        # openpyxl로 저장 (DRM 우회)
+        wb = Workbook()
+        ws = wb.active
+        
+        for row_idx, row_data in enumerate(cleaned_data, 1):
+            for col_idx, cell_value in enumerate(row_data, 1):
+                ws.cell(row=row_idx, column=col_idx, value=cell_value)
+        
+        wb.save(output_path)
+        wb.close()
+        
+        print("Excel 파일 변환 완료")
+        return True
+        
+    except Exception as e:
+        print(f"Excel 처리 오류: {e}")
+        try:
+            excel.Quit()
+            pythoncom.CoUninitialize()
+        except:
+            pass
+        return False
+
+def pdf_drm_bypass(source_path, output_path):
+    """PDF DRM 우회 - Adobe Reader로 읽고 Python으로 저장"""
+    print("PDF 파일 처리 중...")
+    
+    try:
+        # PyMuPDF 설치 확인
+        try:
+            import fitz
+        except ImportError:
+            print("PyMuPDF를 설치해주세요: pip install PyMuPDF")
+            return False
+        
+        # Adobe Acrobat/Reader COM 객체 시도
+        try:
+            pythoncom.CoInitialize()
+            # Adobe Acrobat이 설치된 경우
+            acrobat = win32com.client.DispatchEx("AcroExch.App")
+            acrobat.Show()
+            
+            av_doc = win32com.client.DispatchEx("AcroExch.AVDoc")
+            if av_doc.Open(source_path, ""):
+                pd_doc = av_doc.GetPDDoc()
+                
+                # 임시 파일로 저장 (Adobe를 통해)
+                temp_path = source_path.replace('.pdf', '_temp.pdf')
+                pd_doc.Save(1, temp_path)  # PDSaveIncremental
+                
+                av_doc.Close(True)
+                acrobat.Exit()
+                acrobat = None
+                pythoncom.CoUninitialize()
+                
+                # 임시 파일을 PyMuPDF로 다시 처리 (DRM 우회)
+                doc = fitz.open(temp_path)
+                new_doc = fitz.open()
+                
+                for page_num in range(len(doc)):
+                    page = doc[page_num]
+                    new_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
+                
+                new_doc.save(output_path)
+                new_doc.close()
+                doc.close()
+                
+                # 임시 파일 삭제
+                if os.path.exists(temp_path):
+                    time.sleep(1)
+                    os.remove(temp_path)
+                
+                print("PDF 파일 변환 완료 (Adobe를 통한 DRM 우회)")
+                return True
+            else:
+                raise Exception("Adobe로 파일 열기 실패")
+                
+        except Exception as adobe_error:
+            print(f"Adobe 방식 실패, 직접 방식 시도: {adobe_error}")
+            
+            # 직접 PyMuPDF로 시도 (일부 DRM PDF는 직접 읽기 가능)
+            try:
+                doc = fitz.open(source_path)
+                new_doc = fitz.open()
+                
+                for page_num in range(len(doc)):
+                    page = doc[page_num]
+                    # 텍스트와 이미지 추출
+                    text_dict = page.get_text("dict")
+                    
+                    # 새 페이지 생성
+                    new_page = new_doc.new_page(width=page.rect.width, height=page.rect.height)
+                    
+                    # 텍스트 재구성
+                    for block in text_dict.get("blocks", []):
+                        if "lines" in block:
+                            for line in block["lines"]:
+                                for span in line.get("spans", []):
+                                    text = span.get("text", "")
+                                    if text.strip():
+                                        bbox = span.get("bbox", [0, 0, 100, 20])
+                                        new_page.insert_text(
+                                            (bbox[0], bbox[1]), 
+                                            text, 
+                                            fontsize=span.get("size", 12)
+                                        )
+                
+                new_doc.save(output_path)
+                new_doc.close()
+                doc.close()
+                
+                print("PDF 파일 변환 완료 (직접 방식)")
+                return True
+                
+            except Exception as direct_error:
+                print(f"PDF 직접 처리 오류: {direct_error}")
+                return False
+        
+    except Exception as e:
+        print(f"PDF 처리 오류: {e}")
+        return False
+
+def word_drm_bypass(source_path, output_path):
+    """Word DRM 우회 - Word로 읽고 python-docx로 저장"""
+    print("Word 문서 처리 중...")
+    
+    try:
+        # python-docx 설치 확인
+        try:
+            from docx import Document
+        except ImportError:
+            print("python-docx를 설치해주세요: pip install python-docx")
+            return False
+        
+        pythoncom.CoInitialize()
+        word = win32com.client.DispatchEx("Word.Application")
+        word.Visible = False
+        
+        doc = word.Documents.Open(source_path)
+        
+        # 문서 내용 추출
+        full_text = doc.Content.Text
+        
+        # 표 데이터 추출
+        tables_data = []
+        for table in doc.Tables:
+            table_data = []
+            for row in table.Rows:
+                row_data = []
+                for cell in row.Cells:
+                    row_data.append(cell.Range.Text.strip())
+                table_data.append(row_data)
+            tables_data.append(table_data)
+        
+        doc.Close()
+        word.Quit()
+        pythoncom.CoUninitialize()
+        
+        # python-docx로 새 문서 생성 (DRM 우회)
+        new_doc = Document()
+        
+        # 텍스트 추가
+        paragraphs = full_text.split('\n')
+        for para in paragraphs:
+            if para.strip():
+                new_doc.add_paragraph(para.strip())
+        
+        # 표 추가
+        for table_data in tables_data:
+            if table_data:
+                table = new_doc.add_table(rows=len(table_data), cols=len(table_data[0]))
+                for row_idx, row_data in enumerate(table_data):
+                    for col_idx, cell_text in enumerate(row_data):
+                        table.cell(row_idx, col_idx).text = cell_text
+        
+        new_doc.save(output_path)
+        print("Word 문서 변환 완료")
+        return True
+        
+    except Exception as e:
+        print(f"Word 처리 오류: {e}")
+        try:
+            word.Quit()
+            pythoncom.CoUninitialize()
+        except:
+            pass
+        return False
+
+def ppt_drm_bypass(source_path, output_path):
+    """PowerPoint DRM 우회 - PowerPoint로 읽고 python-pptx로 저장"""
+    print("PowerPoint 프레젠테이션 처리 중...")
+    
+    try:
+        # python-pptx 설치 확인
+        try:
+            from pptx import Presentation
+        except ImportError:
+            print("python-pptx를 설치해주세요: pip install python-pptx")
+            return False
+        
+        pythoncom.CoInitialize()
+        ppt = win32com.client.DispatchEx("PowerPoint.Application")
+        
+        presentation = ppt.Presentations.Open(source_path)
+        
+        # 슬라이드 데이터 추출
+        slides_data = []
+        for slide in presentation.Slides:
+            slide_content = {
+                'title': '',
+                'content': [],
+                'notes': ''
+            }
+            
+            for shape in slide.Shapes:
+                if shape.HasTextFrame:
+                    text = shape.TextFrame.TextRange.Text.strip()
+                    if text:
+                        if shape.Type == 14:  # Title placeholder
+                            slide_content['title'] = text
+                        else:
+                            slide_content['content'].append(text)
+            
+            # 슬라이드 노트
+            if slide.NotesPage.Shapes.Count > 1:
+                notes_text = slide.NotesPage.Shapes(2).TextFrame.TextRange.Text.strip()
+                slide_content['notes'] = notes_text
+            
+            slides_data.append(slide_content)
+        
+        presentation.Close()
+        ppt.Quit()
+        pythoncom.CoUninitialize()
+        
+        # python-pptx로 새 프레젠테이션 생성 (DRM 우회)
+        new_prs = Presentation()
+        
+        for i, slide_data in enumerate(slides_data):
+            if i == 0:
+                slide_layout = new_prs.slide_layouts[0]  # 제목 슬라이드
+            else:
+                slide_layout = new_prs.slide_layouts[1]  # 내용 슬라이드
+            
+            slide = new_prs.slides.add_slide(slide_layout)
+            
+            # 제목 설정
+            if slide_data['title'] and hasattr(slide.shapes, 'title'):
+                slide.shapes.title.text = slide_data['title']
+            
+            # 내용 추가
+            if slide_data['content']:
+                if len(slide.shapes.placeholders) > 1:
+                    content_placeholder = slide.shapes.placeholders[1]
+                    if content_placeholder.has_text_frame:
+                        content_placeholder.text = '\n'.join(slide_data['content'])
+        
+        new_prs.save(output_path)
+        print("PowerPoint 프레젠테이션 변환 완료")
+        return True
+        
+    except Exception as e:
+        print(f"PowerPoint 처리 오류: {e}")
+        try:
+            ppt.Quit()
+            pythoncom.CoUninitialize()
+        except:
+            pass
+        return False
+
+def universal_drm_bypass(source_path, output_path):
+    """파일 확장자에 따라 적절한 DRM 우회 방법 선택"""
+    
+    if not os.path.exists(source_path):
+        print(f"오류: 소스 파일을 찾을 수 없습니다. {source_path}")
+        return False
+    
+    file_ext = Path(source_path).suffix.lower()
+    
+    print(f"파일 형식: {file_ext}")
+    print(f"소스: {source_path}")
+    print(f"출력: {output_path}")
+    print("-" * 50)
+    
+    if file_ext in ['.xlsx', '.xls']:
+        return excel_drm_bypass(source_path, output_path)
+    elif file_ext == '.pdf':
+        return pdf_drm_bypass(source_path, output_path)
+    elif file_ext in ['.docx', '.doc']:
+        return word_drm_bypass(source_path, output_path)
+    elif file_ext in ['.pptx', '.ppt']:
+        return ppt_drm_bypass(source_path, output_path)
+    else:
+        print(f"지원하지 않는 파일 형식: {file_ext}")
+        print("지원 형식: .xlsx, .xls, .pdf, .docx, .doc, .pptx, .ppt")
+        return False
+
+def main():
+    """메인 실행 함수"""
+    source_path = os.path.join(working_directory, source_file)
+    
+    file_path = Path(source_file)
+    output_filename = f"{output_prefix}{file_path.name}"
+    output_path = os.path.join(working_directory, output_filename)
+    
+    print("=" * 60)
+    print("범용 DRM 우회 툴")
+    print("=" * 60)
+    
+    start_time = time.time()
+    
+    if universal_drm_bypass(source_path, output_path):
+        elapsed_time = time.time() - start_time
+        print("-" * 50)
+        print(f"✅ DRM 해제 완료! (소요시간: {elapsed_time:.2f}초)")
+        print(f"📁 저장 위치: {output_path}")
+        print("💡 DRM 암호화가 제거된 파일입니다.")
+    else:
+        print("-" * 50)
+        print("❌ DRM 해제 실패")
+
+if __name__ == "__main__":
+    main()
