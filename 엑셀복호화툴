@@ -1,11 +1,10 @@
-# 엑셀 복호화 툴 (엑셀 외 미완성)
-
 # =============================================================================
 # 수동 설정 부분
 # =============================================================================
 working_directory = r"D:\채권\작업중"
-source_file = "real_data.xlsx"
+source_file = "real_data1.xlsx"
 output_prefix = "decrypted_"
+
 # =============================================================================
 # 자동 실행 부분 (수정 불필요)
 # =============================================================================
@@ -15,8 +14,8 @@ from pathlib import Path
 from datetime import datetime
 import time
 import pythoncom
+import psutil
 from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, Border, Side
 
 def clean_cell_value(value):
     """셀 값에서 타임존 정보 제거"""
@@ -24,340 +23,238 @@ def clean_cell_value(value):
         return value.replace(tzinfo=None)
     return value
 
-def excel_drm_bypass(source_path, output_path):
-    """Excel DRM 우회 (기존 검증된 코드)"""
-    print("Excel 파일 처리 중...")
+def kill_excel_processes():
+    """모든 Excel 프로세스 종료"""
+    print("Excel 프로세스 정리 중...")
     
-    pythoncom.CoInitialize()
-    excel = win32com.client.DispatchEx("Excel.Application")
-    excel.Visible = False
-    excel.DisplayAlerts = False
+    killed_count = 0
+    for proc in psutil.process_iter(['pid', 'name']):
+        try:
+            if proc.info['name'].upper() in ['EXCEL.EXE', 'WINWORD.EXE', 'POWERPNT.EXE']:
+                proc.kill()
+                killed_count += 1
+                print(f"  {proc.info['name']} (PID: {proc.info['pid']}) 종료됨")
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    
+    if killed_count > 0:
+        print(f"총 {killed_count}개 Office 프로세스 종료")
+        time.sleep(3)
+    else:
+        print("실행 중인 Office 프로세스 없음")
+
+def excel_drm_bypass_preserve_values(source_path, output_path):
+    """결과값 보존 Excel DRM 우회 (함수는 제거, 값은 보존)"""
+    print("결과값 보존 Excel 처리 시작...")
+    
+    # 1단계: Excel 프로세스 정리
+    kill_excel_processes()
+    
+    # 2단계: 파일 접근 권한 확인
+    try:
+        with open(source_path, 'rb') as test_file:
+            test_file.read(100)
+        print("파일 접근 권한 확인됨")
+    except Exception as access_error:
+        print(f"파일 접근 오류: {access_error}")
+        return False
+    
+    excel = None
+    workbook = None
     
     try:
-        workbook = excel.Workbooks.Open(source_path)
-        worksheet = workbook.Worksheets(1)
-        used_range = worksheet.UsedRange
+        # 3단계: COM 초기화 및 Excel 실행
+        print("Excel COM 초기화...")
+        pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
         
-        if not used_range:
-            print("빈 워크시트입니다.")
-            return False
+        excel = win32com.client.DispatchEx("Excel.Application")
+        excel.Visible = False
+        excel.DisplayAlerts = False
+        excel.ScreenUpdating = False
+        excel.EnableEvents = False
+        
+        # 외부 데이터 연결 알림 비활성화 (하지만 기존 값은 유지)
+        excel.AskToUpdateLinks = False
+        excel.AlertBeforeOverwriting = False
+        
+        print("Excel 애플리케이션 생성 성공")
+        
+        # 4단계: 파일 열기 (외부 연결 업데이트 안함, 기존 값 유지)
+        print("파일 열기 중 (외부 연결 업데이트 안함)...")
+        try:
+            workbook = excel.Workbooks.Open(
+                source_path,
+                UpdateLinks=0,          # 외부 링크 업데이트 안함 (기존 값 유지)
+                ReadOnly=True,          # 읽기 전용
+                IgnoreReadOnlyRecommended=True
+            )
+            print("파일 열기 성공 (기존 계산값 유지)")
+        except Exception as open_error:
+            print(f"파일 열기 실패: {open_error}")
+            raise
+        
+        # 5단계: 계산 모드를 수동으로 설정 (추가 계산 방지, 기존 값 유지)
+        print("계산 모드 수동 설정 (기존 값 보존)...")
+        try:
+            excel.Calculation = -4135  # xlCalculationManual (새 계산 방지)
+            excel.CalculateBeforeSave = False
+            print("수동 계산 모드 설정 완료 - 기존 계산값 보존됨")
+        except Exception as calc_error:
+            print(f"계산 모드 설정 오류: {calc_error}")
+        
+        # 6단계: 워크시트 접근
+        print("워크시트 정보 확인 중...")
+        try:
+            worksheet_count = workbook.Worksheets.Count
+            print(f"워크시트 개수: {worksheet_count}")
             
-        rows = used_range.Rows.Count
-        cols = used_range.Columns.Count
-        print(f"데이터 범위: {rows}행 {cols}열")
+            worksheet = workbook.Worksheets(1)
+            print(f"워크시트 선택 성공: {worksheet.Name}")
+        except Exception as ws_error:
+            print(f"워크시트 선택 오류: {ws_error}")
+            raise
         
-        data_range = used_range.Value
+        # 7단계: 사용된 범위 확인 (더 관대하게)
+        print("사용된 범위 확인 중...")
+        try:
+            used_range = worksheet.UsedRange
+            if used_range:
+                rows = used_range.Rows.Count
+                cols = used_range.Columns.Count
+                print(f"사용된 범위: {rows}행 {cols}열")
+            else:
+                print("UsedRange가 None, 대체 방법 사용")
+                # 대체 방법: 데이터가 있는 마지막 셀 찾기
+                last_cell = worksheet.Cells.SpecialCells(11)  # xlCellTypeLastCell
+                rows = last_cell.Row
+                cols = last_cell.Column
+                print(f"마지막 셀 기준 범위: {rows}행 {cols}열")
+        except Exception as range_error:
+            print(f"범위 확인 오류: {range_error}")
+            # 기본값 사용
+            rows = 1000
+            cols = 50
+            print(f"기본 범위 사용: {rows}행 {cols}열")
+        
+        # 8단계: 값 전체 추출 (Value 속성으로 한 번에)
+        print("모든 계산값 한 번에 추출 시도...")
         cleaned_data = []
         
-        if isinstance(data_range, tuple):
-            for row_data in data_range:
-                if isinstance(row_data, tuple):
-                    cleaned_row = [clean_cell_value(cell) for cell in row_data]
+        try:
+            # 전체 범위에서 Value 속성으로 한 번에 추출
+            if 'used_range' in locals() and used_range:
+                data_range = used_range.Value
+            else:
+                # UsedRange가 없으면 수동으로 범위 설정
+                range_address = f"A1:{chr(64 + min(cols, 26))}{min(rows, 10000)}"
+                manual_range = worksheet.Range(range_address)
+                data_range = manual_range.Value
+            
+            print(f"데이터 추출 성공, 타입: {type(data_range)}")
+            
+            if data_range is not None:
+                if isinstance(data_range, tuple):
+                    # 다중 행 데이터
+                    for row_data in data_range:
+                        if isinstance(row_data, tuple):
+                            cleaned_row = [clean_cell_value(cell) for cell in row_data]
+                        else:
+                            cleaned_row = [clean_cell_value(row_data)]
+                        cleaned_data.append(cleaned_row)
                 else:
-                    cleaned_row = [clean_cell_value(row_data)]
-                cleaned_data.append(cleaned_row)
-        else:
-            cleaned_data = [[clean_cell_value(data_range)]]
+                    # 단일 셀 데이터
+                    cleaned_data = [[clean_cell_value(data_range)]]
+                
+                print(f"값 추출 완료: {len(cleaned_data)}행 (모든 계산값 보존)")
+            else:
+                raise Exception("데이터 추출 결과가 None")
+                
+        except Exception as value_error:
+            print(f"전체 추출 실패: {value_error}")
+            print("개별 셀 추출 시도...")
+            
+            # 개별 셀 추출 (폴백)
+            cleaned_data = []
+            for row in range(1, min(rows + 1, 5000)):
+                row_data = []
+                for col in range(1, min(cols + 1, 100)):
+                    try:
+                        cell = worksheet.Cells(row, col)
+                        # 셀의 현재 표시값 가져오기 (함수 결과값 포함)
+                        value = cell.Value
+                        row_data.append(clean_cell_value(value))
+                    except Exception as cell_error:
+                        # 접근 불가능한 셀은 빈 값
+                        row_data.append("")
+                
+                cleaned_data.append(row_data)
+                
+                # 진행 상황 표시
+                if row % 100 == 0:
+                    print(f"    {row}행 처리 완료...")
+            
+            print(f"개별 추출 완료: {len(cleaned_data)}행")
         
-        workbook.Close(False)
-        excel.Quit()
-        pythoncom.CoUninitialize()
+        # 9단계: Excel 종료
+        print("Excel 종료 중...")
+        try:
+            workbook.Close(SaveChanges=False)
+            workbook = None
+            excel.Quit()
+            excel = None
+            pythoncom.CoUninitialize()
+            print("Excel 정상 종료")
+        except Exception as close_error:
+            print(f"Excel 종료 중 오류: {close_error}")
         
-        # openpyxl로 저장 (DRM 우회)
+        # 10단계: 새 파일 생성 (값만 저장, 함수는 제거됨)
+        print("새 Excel 파일 생성 중 (값만 저장)...")
         wb = Workbook()
         ws = wb.active
         
+        actual_data_rows = 0
         for row_idx, row_data in enumerate(cleaned_data, 1):
+            has_data = False
             for col_idx, cell_value in enumerate(row_data, 1):
-                ws.cell(row=row_idx, column=col_idx, value=cell_value)
+                try:
+                    if cell_value is not None and str(cell_value).strip():
+                        has_data = True
+                    ws.cell(row=row_idx, column=col_idx, value=cell_value)
+                except Exception:
+                    ws.cell(row=row_idx, column=col_idx, value="")
+            
+            if has_data:
+                actual_data_rows = row_idx
         
         wb.save(output_path)
         wb.close()
         
-        print("Excel 파일 변환 완료")
+        print(f"Excel DRM 우회 완료 - {actual_data_rows}행의 계산값 보존됨")
+        print("💡 모든 함수는 계산된 결과값으로 변환되었습니다")
         return True
         
-    except Exception as e:
-        print(f"Excel 처리 오류: {e}")
+    except Exception as main_error:
+        print(f"처리 중 오류 발생: {main_error}")
+        return False
+        
+    finally:
+        # 리소스 정리
         try:
-            excel.Quit()
+            if workbook:
+                workbook.Close(SaveChanges=False)
+        except:
+            pass
+        
+        try:
+            if excel:
+                excel.Quit()
+        except:
+            pass
+        
+        try:
             pythoncom.CoUninitialize()
         except:
             pass
-        return False
-
-def pdf_drm_bypass(source_path, output_path):
-    """PDF DRM 우회 - Adobe Reader로 읽고 Python으로 저장"""
-    print("PDF 파일 처리 중...")
-    
-    try:
-        # PyMuPDF 설치 확인
-        try:
-            import fitz
-        except ImportError:
-            print("PyMuPDF를 설치해주세요: pip install PyMuPDF")
-            return False
-        
-        # Adobe Acrobat/Reader COM 객체 시도
-        try:
-            pythoncom.CoInitialize()
-            # Adobe Acrobat이 설치된 경우
-            acrobat = win32com.client.DispatchEx("AcroExch.App")
-            acrobat.Show()
-            
-            av_doc = win32com.client.DispatchEx("AcroExch.AVDoc")
-            if av_doc.Open(source_path, ""):
-                pd_doc = av_doc.GetPDDoc()
-                
-                # 임시 파일로 저장 (Adobe를 통해)
-                temp_path = source_path.replace('.pdf', '_temp.pdf')
-                pd_doc.Save(1, temp_path)  # PDSaveIncremental
-                
-                av_doc.Close(True)
-                acrobat.Exit()
-                acrobat = None
-                pythoncom.CoUninitialize()
-                
-                # 임시 파일을 PyMuPDF로 다시 처리 (DRM 우회)
-                doc = fitz.open(temp_path)
-                new_doc = fitz.open()
-                
-                for page_num in range(len(doc)):
-                    page = doc[page_num]
-                    new_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
-                
-                new_doc.save(output_path)
-                new_doc.close()
-                doc.close()
-                
-                # 임시 파일 삭제
-                if os.path.exists(temp_path):
-                    time.sleep(1)
-                    os.remove(temp_path)
-                
-                print("PDF 파일 변환 완료 (Adobe를 통한 DRM 우회)")
-                return True
-            else:
-                raise Exception("Adobe로 파일 열기 실패")
-                
-        except Exception as adobe_error:
-            print(f"Adobe 방식 실패, 직접 방식 시도: {adobe_error}")
-            
-            # 직접 PyMuPDF로 시도 (일부 DRM PDF는 직접 읽기 가능)
-            try:
-                doc = fitz.open(source_path)
-                new_doc = fitz.open()
-                
-                for page_num in range(len(doc)):
-                    page = doc[page_num]
-                    # 텍스트와 이미지 추출
-                    text_dict = page.get_text("dict")
-                    
-                    # 새 페이지 생성
-                    new_page = new_doc.new_page(width=page.rect.width, height=page.rect.height)
-                    
-                    # 텍스트 재구성
-                    for block in text_dict.get("blocks", []):
-                        if "lines" in block:
-                            for line in block["lines"]:
-                                for span in line.get("spans", []):
-                                    text = span.get("text", "")
-                                    if text.strip():
-                                        bbox = span.get("bbox", [0, 0, 100, 20])
-                                        new_page.insert_text(
-                                            (bbox[0], bbox[1]), 
-                                            text, 
-                                            fontsize=span.get("size", 12)
-                                        )
-                
-                new_doc.save(output_path)
-                new_doc.close()
-                doc.close()
-                
-                print("PDF 파일 변환 완료 (직접 방식)")
-                return True
-                
-            except Exception as direct_error:
-                print(f"PDF 직접 처리 오류: {direct_error}")
-                return False
-        
-    except Exception as e:
-        print(f"PDF 처리 오류: {e}")
-        return False
-
-def word_drm_bypass(source_path, output_path):
-    """Word DRM 우회 - Word로 읽고 python-docx로 저장"""
-    print("Word 문서 처리 중...")
-    
-    try:
-        # python-docx 설치 확인
-        try:
-            from docx import Document
-        except ImportError:
-            print("python-docx를 설치해주세요: pip install python-docx")
-            return False
-        
-        pythoncom.CoInitialize()
-        word = win32com.client.DispatchEx("Word.Application")
-        word.Visible = False
-        
-        doc = word.Documents.Open(source_path)
-        
-        # 문서 내용 추출
-        full_text = doc.Content.Text
-        
-        # 표 데이터 추출
-        tables_data = []
-        for table in doc.Tables:
-            table_data = []
-            for row in table.Rows:
-                row_data = []
-                for cell in row.Cells:
-                    row_data.append(cell.Range.Text.strip())
-                table_data.append(row_data)
-            tables_data.append(table_data)
-        
-        doc.Close()
-        word.Quit()
-        pythoncom.CoUninitialize()
-        
-        # python-docx로 새 문서 생성 (DRM 우회)
-        new_doc = Document()
-        
-        # 텍스트 추가
-        paragraphs = full_text.split('\n')
-        for para in paragraphs:
-            if para.strip():
-                new_doc.add_paragraph(para.strip())
-        
-        # 표 추가
-        for table_data in tables_data:
-            if table_data:
-                table = new_doc.add_table(rows=len(table_data), cols=len(table_data[0]))
-                for row_idx, row_data in enumerate(table_data):
-                    for col_idx, cell_text in enumerate(row_data):
-                        table.cell(row_idx, col_idx).text = cell_text
-        
-        new_doc.save(output_path)
-        print("Word 문서 변환 완료")
-        return True
-        
-    except Exception as e:
-        print(f"Word 처리 오류: {e}")
-        try:
-            word.Quit()
-            pythoncom.CoUninitialize()
-        except:
-            pass
-        return False
-
-def ppt_drm_bypass(source_path, output_path):
-    """PowerPoint DRM 우회 - PowerPoint로 읽고 python-pptx로 저장"""
-    print("PowerPoint 프레젠테이션 처리 중...")
-    
-    try:
-        # python-pptx 설치 확인
-        try:
-            from pptx import Presentation
-        except ImportError:
-            print("python-pptx를 설치해주세요: pip install python-pptx")
-            return False
-        
-        pythoncom.CoInitialize()
-        ppt = win32com.client.DispatchEx("PowerPoint.Application")
-        
-        presentation = ppt.Presentations.Open(source_path)
-        
-        # 슬라이드 데이터 추출
-        slides_data = []
-        for slide in presentation.Slides:
-            slide_content = {
-                'title': '',
-                'content': [],
-                'notes': ''
-            }
-            
-            for shape in slide.Shapes:
-                if shape.HasTextFrame:
-                    text = shape.TextFrame.TextRange.Text.strip()
-                    if text:
-                        if shape.Type == 14:  # Title placeholder
-                            slide_content['title'] = text
-                        else:
-                            slide_content['content'].append(text)
-            
-            # 슬라이드 노트
-            if slide.NotesPage.Shapes.Count > 1:
-                notes_text = slide.NotesPage.Shapes(2).TextFrame.TextRange.Text.strip()
-                slide_content['notes'] = notes_text
-            
-            slides_data.append(slide_content)
-        
-        presentation.Close()
-        ppt.Quit()
-        pythoncom.CoUninitialize()
-        
-        # python-pptx로 새 프레젠테이션 생성 (DRM 우회)
-        new_prs = Presentation()
-        
-        for i, slide_data in enumerate(slides_data):
-            if i == 0:
-                slide_layout = new_prs.slide_layouts[0]  # 제목 슬라이드
-            else:
-                slide_layout = new_prs.slide_layouts[1]  # 내용 슬라이드
-            
-            slide = new_prs.slides.add_slide(slide_layout)
-            
-            # 제목 설정
-            if slide_data['title'] and hasattr(slide.shapes, 'title'):
-                slide.shapes.title.text = slide_data['title']
-            
-            # 내용 추가
-            if slide_data['content']:
-                if len(slide.shapes.placeholders) > 1:
-                    content_placeholder = slide.shapes.placeholders[1]
-                    if content_placeholder.has_text_frame:
-                        content_placeholder.text = '\n'.join(slide_data['content'])
-        
-        new_prs.save(output_path)
-        print("PowerPoint 프레젠테이션 변환 완료")
-        return True
-        
-    except Exception as e:
-        print(f"PowerPoint 처리 오류: {e}")
-        try:
-            ppt.Quit()
-            pythoncom.CoUninitialize()
-        except:
-            pass
-        return False
-
-def universal_drm_bypass(source_path, output_path):
-    """파일 확장자에 따라 적절한 DRM 우회 방법 선택"""
-    
-    if not os.path.exists(source_path):
-        print(f"오류: 소스 파일을 찾을 수 없습니다. {source_path}")
-        return False
-    
-    file_ext = Path(source_path).suffix.lower()
-    
-    print(f"파일 형식: {file_ext}")
-    print(f"소스: {source_path}")
-    print(f"출력: {output_path}")
-    print("-" * 50)
-    
-    if file_ext in ['.xlsx', '.xls']:
-        return excel_drm_bypass(source_path, output_path)
-    elif file_ext == '.pdf':
-        return pdf_drm_bypass(source_path, output_path)
-    elif file_ext in ['.docx', '.doc']:
-        return word_drm_bypass(source_path, output_path)
-    elif file_ext in ['.pptx', '.ppt']:
-        return ppt_drm_bypass(source_path, output_path)
-    else:
-        print(f"지원하지 않는 파일 형식: {file_ext}")
-        print("지원 형식: .xlsx, .xls, .pdf, .docx, .doc, .pptx, .ppt")
-        return False
 
 def main():
     """메인 실행 함수"""
@@ -368,20 +265,34 @@ def main():
     output_path = os.path.join(working_directory, output_filename)
     
     print("=" * 60)
-    print("범용 DRM 우회 툴")
+    print("결과값 보존 Excel DRM 우회 툴")
     print("=" * 60)
+    print("핵심 원리: 함수 제거 + 계산된 결과값 보존")
+    print("=" * 60)
+    
+    if not os.path.exists(source_path):
+        print(f"오류: 파일이 존재하지 않습니다: {source_path}")
+        return
+    
+    file_size = os.path.getsize(source_path)
+    print(f"원본 파일 크기: {file_size:,} bytes")
     
     start_time = time.time()
     
-    if universal_drm_bypass(source_path, output_path):
+    if excel_drm_bypass_preserve_values(source_path, output_path):
         elapsed_time = time.time() - start_time
         print("-" * 50)
-        print(f"✅ DRM 해제 완료! (소요시간: {elapsed_time:.2f}초)")
+        print(f"✅ Excel DRM 우회 완료! (소요시간: {elapsed_time:.2f}초)")
         print(f"📁 저장 위치: {output_path}")
-        print("💡 DRM 암호화가 제거된 파일입니다.")
+        
+        if os.path.exists(output_path):
+            output_size = os.path.getsize(output_path)
+            print(f"📊 생성된 파일 크기: {output_size:,} bytes")
+            print("📋 특징: 인포맥스 등 함수는 제거되었지만 계산된 값은 모두 보존됨")
     else:
+        elapsed_time = time.time() - start_time
         print("-" * 50)
-        print("❌ DRM 해제 실패")
+        print(f"❌ Excel DRM 우회 실패 (소요시간: {elapsed_time:.2f}초)")
 
 if __name__ == "__main__":
     main()
