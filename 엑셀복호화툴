@@ -23,6 +23,19 @@ def clean_cell_value(value):
         return value.replace(tzinfo=None)
     return value
 
+def is_external_function(formula):
+    """외부 함수인지 확인"""
+    if not formula or not isinstance(formula, str):
+        return False
+    
+    formula_upper = formula.upper()
+    external_functions = [
+        'INFOMAX', 'RTD', 'WEBSERVICE', 'EXTERNAL', 
+        'BLOOMBERG', 'REUTERS', 'FACTSET', 'REFINITIV'
+    ]
+    
+    return any(func in formula_upper for func in external_functions)
+
 def kill_excel_processes():
     """모든 Excel 프로세스 종료"""
     print("Excel 프로세스 정리 중...")
@@ -39,13 +52,13 @@ def kill_excel_processes():
     
     if killed_count > 0:
         print(f"총 {killed_count}개 Office 프로세스 종료")
-        time.sleep(3)
+        time.sleep(2)
     else:
         print("실행 중인 Office 프로세스 없음")
 
-def excel_drm_bypass_preserve_values(source_path, output_path):
-    """결과값 보존 Excel DRM 우회 (함수는 제거, 값은 보존)"""
-    print("결과값 보존 Excel 처리 시작...")
+def excel_drm_bypass_fixed_len_error(source_path, output_path):
+    """__len__ 오류 해결 Excel DRM 우회"""
+    print("__len__ 오류 해결 Excel 처리 시작...")
     
     # 1단계: Excel 프로세스 정리
     kill_excel_processes()
@@ -63,7 +76,7 @@ def excel_drm_bypass_preserve_values(source_path, output_path):
     workbook = None
     
     try:
-        # 3단계: COM 초기화 및 Excel 실행
+        # 3단계: Excel 초기화
         print("Excel COM 초기화...")
         pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
         
@@ -72,131 +85,176 @@ def excel_drm_bypass_preserve_values(source_path, output_path):
         excel.DisplayAlerts = False
         excel.ScreenUpdating = False
         excel.EnableEvents = False
-        
-        # 외부 데이터 연결 알림 비활성화 (하지만 기존 값은 유지)
         excel.AskToUpdateLinks = False
-        excel.AlertBeforeOverwriting = False
         
         print("Excel 애플리케이션 생성 성공")
         
-        # 4단계: 파일 열기 (외부 연결 업데이트 안함, 기존 값 유지)
-        print("파일 열기 중 (외부 연결 업데이트 안함)...")
+        # 4단계: 안전한 파일 열기 (COM 객체 안전 체크)
+        print("안전한 방법으로 파일 열기...")
+        
+        workbook_opened = False
+        
+        # 방법 1: 외부 연결 차단 + 모든 옵션
         try:
+            print("  방법 1: 완전 차단 방식 시도...")
             workbook = excel.Workbooks.Open(
                 source_path,
-                UpdateLinks=0,          # 외부 링크 업데이트 안함 (기존 값 유지)
-                ReadOnly=True,          # 읽기 전용
-                IgnoreReadOnlyRecommended=True
+                UpdateLinks=0,
+                ReadOnly=True,
+                IgnoreReadOnlyRecommended=True,
+                CorruptLoad=2
             )
-            print("파일 열기 성공 (기존 계산값 유지)")
-        except Exception as open_error:
-            print(f"파일 열기 실패: {open_error}")
-            raise
+            workbook_opened = True
+            print("  방법 1 성공!")
+        except Exception as open1_error:
+            print(f"  방법 1 실패: {open1_error}")
         
-        # 5단계: 계산 모드를 수동으로 설정 (추가 계산 방지, 기존 값 유지)
-        print("계산 모드 수동 설정 (기존 값 보존)...")
+        # 방법 2: 기본 + 외부 연결 차단
+        if not workbook_opened:
+            try:
+                print("  방법 2: 기본 차단 방식 시도...")
+                workbook = excel.Workbooks.Open(source_path, UpdateLinks=0, ReadOnly=True)
+                workbook_opened = True
+                print("  방법 2 성공!")
+            except Exception as open2_error:
+                print(f"  방법 2 실패: {open2_error}")
+        
+        # 방법 3: 최소 옵션
+        if not workbook_opened:
+            try:
+                print("  방법 3: 최소 옵션 방식 시도...")
+                workbook = excel.Workbooks.Open(source_path, UpdateLinks=0)
+                workbook_opened = True
+                print("  방법 3 성공!")
+            except Exception as open3_error:
+                print(f"  방법 3 실패: {open3_error}")
+        
+        # 방법 4: 기본 열기
+        if not workbook_opened:
+            try:
+                print("  방법 4: 기본 열기 시도...")
+                workbook = excel.Workbooks.Open(source_path)
+                workbook_opened = True
+                print("  방법 4 성공!")
+            except Exception as open4_error:
+                print(f"  방법 4 실패: {open4_error}")
+        
+        # 파일 열기 검증
+        if not workbook_opened:
+            raise Exception("모든 파일 열기 방법 실패")
+        
+        # workbook 객체 유효성 검증 (안전한 방법)
         try:
-            excel.Calculation = -4135  # xlCalculationManual (새 계산 방지)
+            worksheet_count = workbook.Worksheets.Count
+            print(f"워크북 로드 확인: {worksheet_count}개 워크시트")
+        except Exception as verify_error:
+            print(f"워크북 검증 실패: {verify_error}")
+            raise Exception("워크북이 제대로 로드되지 않음")
+        
+        # 5단계: 계산 모드 수동 설정
+        print("계산 모드 수동 설정...")
+        try:
+            excel.Calculation = -4135  # xlCalculationManual
             excel.CalculateBeforeSave = False
-            print("수동 계산 모드 설정 완료 - 기존 계산값 보존됨")
+            print("수동 계산 모드 설정 완료")
         except Exception as calc_error:
             print(f"계산 모드 설정 오류: {calc_error}")
         
-        # 6단계: 워크시트 접근
-        print("워크시트 정보 확인 중...")
+        # 6단계: 워크시트 선택
+        print("워크시트 선택...")
         try:
-            worksheet_count = workbook.Worksheets.Count
-            print(f"워크시트 개수: {worksheet_count}")
-            
             worksheet = workbook.Worksheets(1)
             print(f"워크시트 선택 성공: {worksheet.Name}")
         except Exception as ws_error:
             print(f"워크시트 선택 오류: {ws_error}")
             raise
         
-        # 7단계: 사용된 범위 확인 (더 관대하게)
-        print("사용된 범위 확인 중...")
+        # 7단계: 사용된 범위 확인
+        print("사용된 범위 확인...")
         try:
             used_range = worksheet.UsedRange
-            if used_range:
+            
+            # used_range 검증 (안전한 방법)
+            try:
                 rows = used_range.Rows.Count
                 cols = used_range.Columns.Count
                 print(f"사용된 범위: {rows}행 {cols}열")
-            else:
-                print("UsedRange가 None, 대체 방법 사용")
-                # 대체 방법: 데이터가 있는 마지막 셀 찾기
-                last_cell = worksheet.Cells.SpecialCells(11)  # xlCellTypeLastCell
+            except Exception as range_verify_error:
+                print(f"범위 확인 실패: {range_verify_error}")
+                # 대체 방법
+                last_cell = worksheet.Cells.SpecialCells(11)
                 rows = last_cell.Row
                 cols = last_cell.Column
-                print(f"마지막 셀 기준 범위: {rows}행 {cols}열")
+                print(f"대체 방법으로 범위 확인: {rows}행 {cols}열")
+                
+                # 범위 재설정
+                range_address = f"A1:{chr(64 + min(cols, 26))}{min(rows, 5000)}"
+                used_range = worksheet.Range(range_address)
+                
         except Exception as range_error:
             print(f"범위 확인 오류: {range_error}")
-            # 기본값 사용
-            rows = 1000
-            cols = 50
-            print(f"기본 범위 사용: {rows}행 {cols}열")
+            raise
         
-        # 8단계: 값 전체 추출 (Value 속성으로 한 번에)
-        print("모든 계산값 한 번에 추출 시도...")
-        cleaned_data = []
+        # 8단계: 고속 데이터 추출
+        print("고속 데이터 추출 시작...")
+        start_extract = time.time()
+        
+        values_data = None
+        formulas_data = None
         
         try:
-            # 전체 범위에서 Value 속성으로 한 번에 추출
-            if 'used_range' in locals() and used_range:
-                data_range = used_range.Value
-            else:
-                # UsedRange가 없으면 수동으로 범위 설정
-                range_address = f"A1:{chr(64 + min(cols, 26))}{min(rows, 10000)}"
-                manual_range = worksheet.Range(range_address)
-                data_range = manual_range.Value
+            # 전체 값 한 번에 추출
+            print("  전체 값 추출...")
+            values_data = used_range.Value
+            print(f"  값 추출 완료 ({time.time() - start_extract:.2f}초)")
             
-            print(f"데이터 추출 성공, 타입: {type(data_range)}")
+            # 전체 수식 한 번에 추출
+            print("  전체 수식 추출...")
+            start_formula = time.time()
+            try:
+                formulas_data = used_range.Formula
+                print(f"  수식 추출 완료 ({time.time() - start_formula:.2f}초)")
+            except Exception as formula_error:
+                print(f"  수식 추출 실패: {formula_error}")
+                print("  수식 없이 진행...")
+                formulas_data = None
             
-            if data_range is not None:
-                if isinstance(data_range, tuple):
-                    # 다중 행 데이터
-                    for row_data in data_range:
-                        if isinstance(row_data, tuple):
-                            cleaned_row = [clean_cell_value(cell) for cell in row_data]
-                        else:
-                            cleaned_row = [clean_cell_value(row_data)]
-                        cleaned_data.append(cleaned_row)
-                else:
-                    # 단일 셀 데이터
-                    cleaned_data = [[clean_cell_value(data_range)]]
+        except Exception as extract_error:
+            print(f"고속 추출 실패: {extract_error}")
+            print("개별 셀 접근으로 폴백...")
+            
+            # 폴백: 개별 셀 접근
+            values_data = []
+            formulas_data = []
+            
+            for row in range(1, min(rows + 1, 3000)):
+                value_row = []
+                formula_row = []
                 
-                print(f"값 추출 완료: {len(cleaned_data)}행 (모든 계산값 보존)")
-            else:
-                raise Exception("데이터 추출 결과가 None")
-                
-        except Exception as value_error:
-            print(f"전체 추출 실패: {value_error}")
-            print("개별 셀 추출 시도...")
-            
-            # 개별 셀 추출 (폴백)
-            cleaned_data = []
-            for row in range(1, min(rows + 1, 5000)):
-                row_data = []
                 for col in range(1, min(cols + 1, 100)):
                     try:
                         cell = worksheet.Cells(row, col)
-                        # 셀의 현재 표시값 가져오기 (함수 결과값 포함)
-                        value = cell.Value
-                        row_data.append(clean_cell_value(value))
-                    except Exception as cell_error:
-                        # 접근 불가능한 셀은 빈 값
-                        row_data.append("")
+                        value_row.append(cell.Value)
+                        if cell.HasFormula:
+                            formula_row.append(cell.Formula)
+                        else:
+                            formula_row.append(None)
+                    except:
+                        value_row.append(None)
+                        formula_row.append(None)
                 
-                cleaned_data.append(row_data)
+                values_data.append(tuple(value_row))
+                formulas_data.append(tuple(formula_row))
                 
-                # 진행 상황 표시
                 if row % 100 == 0:
-                    print(f"    {row}행 처리 완료...")
+                    print(f"    {row}행 처리...")
             
-            print(f"개별 추출 완료: {len(cleaned_data)}행")
+            values_data = tuple(values_data)
+            formulas_data = tuple(formulas_data)
+            print("개별 셀 접근 완료")
         
         # 9단계: Excel 종료
-        print("Excel 종료 중...")
+        print("Excel 종료...")
         try:
             workbook.Close(SaveChanges=False)
             workbook = None
@@ -207,46 +265,112 @@ def excel_drm_bypass_preserve_values(source_path, output_path):
         except Exception as close_error:
             print(f"Excel 종료 중 오류: {close_error}")
         
-        # 10단계: 새 파일 생성 (값만 저장, 함수는 제거됨)
-        print("새 Excel 파일 생성 중 (값만 저장)...")
+        # 10단계: 메모리에서 고속 처리
+        print("메모리에서 고속 처리...")
+        start_process = time.time()
+        
+        # 데이터 검증 및 정규화
+        if values_data is None:
+            print("데이터가 없습니다")
+            return False
+        
+        # 데이터 타입 정규화
+        if not isinstance(values_data, tuple):
+            values_data = ((values_data,),)
+        elif len(values_data) > 0 and not isinstance(values_data[0], tuple):
+            values_data = tuple((item,) for item in values_data)
+        
+        if formulas_data:
+            if not isinstance(formulas_data, tuple):
+                formulas_data = ((formulas_data,),)
+            elif len(formulas_data) > 0 and not isinstance(formulas_data[0], tuple):
+                formulas_data = tuple((item,) for item in formulas_data)
+        
+        # 통계
+        external_functions_found = 0
+        internal_functions_preserved = 0
+        values_preserved = 0
+        
+        # 새 Excel 파일 생성
+        print("새 파일 생성...")
         wb = Workbook()
         ws = wb.active
         
-        actual_data_rows = 0
-        for row_idx, row_data in enumerate(cleaned_data, 1):
-            has_data = False
-            for col_idx, cell_value in enumerate(row_data, 1):
-                try:
-                    if cell_value is not None and str(cell_value).strip():
-                        has_data = True
-                    ws.cell(row=row_idx, column=col_idx, value=cell_value)
-                except Exception:
-                    ws.cell(row=row_idx, column=col_idx, value="")
+        for row_idx, value_row in enumerate(values_data):
+            if not isinstance(value_row, tuple):
+                value_row = (value_row,)
             
-            if has_data:
-                actual_data_rows = row_idx
+            # 해당 행의 수식
+            formula_row = None
+            if formulas_data and row_idx < len(formulas_data):
+                formula_row = formulas_data[row_idx]
+                if not isinstance(formula_row, tuple):
+                    formula_row = (formula_row,)
+            
+            for col_idx, cell_value in enumerate(value_row):
+                excel_row = row_idx + 1
+                excel_col = col_idx + 1
+                
+                try:
+                    # 수식 확인
+                    cell_formula = None
+                    if formula_row and col_idx < len(formula_row):
+                        cell_formula = formula_row[col_idx]
+                    
+                    # 수식 처리
+                    has_formula = (cell_formula and 
+                                 isinstance(cell_formula, str) and 
+                                 cell_formula.startswith('='))
+                    
+                    if has_formula:
+                        if is_external_function(cell_formula):
+                            # 외부 함수 → 값 변환
+                            ws.cell(row=excel_row, column=excel_col, value=clean_cell_value(cell_value))
+                            external_functions_found += 1
+                        else:
+                            # 일반 함수 → 수식 보존
+                            ws.cell(row=excel_row, column=excel_col, value=cell_formula)
+                            internal_functions_preserved += 1
+                    else:
+                        # 일반 값
+                        ws.cell(row=excel_row, column=excel_col, value=clean_cell_value(cell_value))
+                        if cell_value is not None and str(cell_value).strip():
+                            values_preserved += 1
+                
+                except Exception:
+                    ws.cell(row=excel_row, column=excel_col, value="")
         
+        process_time = time.time() - start_process
+        print(f"메모리 처리 완료: {process_time:.2f}초")
+        
+        # 11단계: 파일 저장
+        print("파일 저장...")
         wb.save(output_path)
         wb.close()
         
-        print(f"Excel DRM 우회 완료 - {actual_data_rows}행의 계산값 보존됨")
-        print("💡 모든 함수는 계산된 결과값으로 변환되었습니다")
+        total_time = time.time() - start_extract
+        print(f"총 데이터 처리 시간: {total_time:.2f}초")
+        print("처리 통계:")
+        print(f"  - 외부 함수 → 값 변환: {external_functions_found}개")
+        print(f"  - 일반 함수 보존: {internal_functions_preserved}개")
+        print(f"  - 일반 값 보존: {values_preserved}개")
+        
         return True
         
     except Exception as main_error:
-        print(f"처리 중 오류 발생: {main_error}")
+        print(f"처리 중 오류: {main_error}")
         return False
         
     finally:
         # 리소스 정리
         try:
-            if workbook:
+            if workbook is not None:
                 workbook.Close(SaveChanges=False)
         except:
             pass
         
         try:
-            if excel:
+            if excel is not None:
                 excel.Quit()
         except:
             pass
@@ -265,9 +389,9 @@ def main():
     output_path = os.path.join(working_directory, output_filename)
     
     print("=" * 60)
-    print("결과값 보존 Excel DRM 우회 툴")
+    print("Excel DRM 복호화 툴")
     print("=" * 60)
-    print("핵심 원리: 함수 제거 + 계산된 결과값 보존")
+    print("COM 객체 안전 처리 + 고속 데이터 처리")
     print("=" * 60)
     
     if not os.path.exists(source_path):
@@ -279,7 +403,7 @@ def main():
     
     start_time = time.time()
     
-    if excel_drm_bypass_preserve_values(source_path, output_path):
+    if excel_drm_bypass_fixed_len_error(source_path, output_path):
         elapsed_time = time.time() - start_time
         print("-" * 50)
         print(f"✅ Excel DRM 우회 완료! (소요시간: {elapsed_time:.2f}초)")
@@ -288,7 +412,6 @@ def main():
         if os.path.exists(output_path):
             output_size = os.path.getsize(output_path)
             print(f"📊 생성된 파일 크기: {output_size:,} bytes")
-            print("📋 특징: 인포맥스 등 함수는 제거되었지만 계산된 값은 모두 보존됨")
     else:
         elapsed_time = time.time() - start_time
         print("-" * 50)
