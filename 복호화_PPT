@@ -1,0 +1,122 @@
+import win32com.client
+import pythoncom
+from pathlib import Path
+import tempfile
+import time
+import zipfile
+
+pythoncom.CoInitialize()
+
+# ===== 경로 설정 =====
+source_file = Path(r"D:\채권\작업중\예금보험기금유니버스11호(은행)_월간운용보고서_2507.pptx")
+output_odp = Path(r"D:\채권\작업중\예금보험기금유니버스11호(은행)_월간운용보고서_2507_de.odp")
+
+# temp에 먼저 저장
+temp_odp = Path(tempfile.gettempdir()) / "pptx_temp.odp"
+
+ppt_app = win32com.client.DispatchEx("PowerPoint.Application")
+
+def check_drm(file_path):
+    """DRM 여부 확인"""
+    try:
+        with zipfile.ZipFile(file_path, 'r') as zf:
+            zf.namelist()
+        return False  # DRM 없음
+    except:
+        return True   # DRM 있음
+
+try:
+    # ===== 원본 파일 열기 =====
+    source_pres = ppt_app.Presentations.Open(
+        str(source_file),
+        ReadOnly=True,
+        WithWindow=False
+    )
+    
+    print(f"원본 파일 열기 성공: {source_pres.Slides.Count}개 슬라이드")
+    
+    # ===== 새 프레젠테이션 생성 =====
+    new_pres = ppt_app.Presentations.Add(WithWindow=False)
+    
+    # 슬라이드 크기 맞추기
+    new_pres.PageSetup.SlideWidth = source_pres.PageSetup.SlideWidth
+    new_pres.PageSetup.SlideHeight = source_pres.PageSetup.SlideHeight
+    
+    # ===== 모든 슬라이드 복사 (재시도 로직 포함) =====
+    print("슬라이드 복사 중...")
+    total_slides = source_pres.Slides.Count
+    
+    for i in range(1, total_slides + 1):
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                source_pres.Slides(i).Copy()
+                time.sleep(0.3)  # 클립보드 안정화 대기 시간 증가
+                new_pres.Slides.Paste()
+                print(f"  슬라이드 {i}/{total_slides} 복사 완료")
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"  슬라이드 {i} 재시도 중... ({attempt + 1}/{max_retries})")
+                    time.sleep(1)  # 재시도 전 대기
+                else:
+                    print(f"  ✗ 슬라이드 {i} 복사 실패: {e}")
+    
+    # 기본 빈 슬라이드 삭제
+    while new_pres.Slides.Count > total_slides:
+        new_pres.Slides(1).Delete()
+    
+    print(f"\n복사된 슬라이드: {new_pres.Slides.Count}개")
+    
+    # ===== temp에 ODP로 저장 =====
+    if temp_odp.exists():
+        temp_odp.unlink()
+    
+    print(f"\ntemp에 ODP 저장 중...")
+    new_pres.SaveAs(str(temp_odp), 35)  # 35 = ppSaveAsODP
+    time.sleep(0.5)
+    
+    source_pres.Close()
+    new_pres.Close()
+    
+    print(f"temp ODP 저장 완료: {temp_odp}")
+    
+except Exception as e:
+    print(f"오류 발생: {e}")
+    
+finally:
+    ppt_app.Quit()
+    del ppt_app
+
+# ===== temp에서 최종 경로로 복사 =====
+print("\n" + "="*50)
+
+if temp_odp.exists():
+    # DRM 확인
+    if check_drm(temp_odp):
+        print(f"✗ temp ODP에 DRM이 걸려 있습니다.")
+    else:
+        print(f"✓ temp ODP는 DRM 없음!")
+        
+        # Python으로 바이트 복사
+        with open(temp_odp, 'rb') as f:
+            data = f.read()
+        
+        with open(output_odp, 'wb') as f:
+            f.write(data)
+        
+        # temp 파일 삭제
+        temp_odp.unlink()
+        
+        # 최종 확인
+        if output_odp.exists():
+            if check_drm(output_odp):
+                print(f"✗ 최종 파일에 DRM이 걸렸습니다.")
+            else:
+                print(f"✓ 성공! DRM 없는 ODP 생성됨")
+                print(f"  경로: {output_odp}")
+                print(f"  크기: {output_odp.stat().st_size:,} bytes")
+else:
+    print(f"✗ temp ODP 파일이 생성되지 않았습니다.")
+
+print("="*50)
